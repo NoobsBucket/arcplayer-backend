@@ -14,12 +14,9 @@ app.add_middleware(
 )
 
 executor = ThreadPoolExecutor(max_workers=4)
-
-
 @app.get("/health")
 async def health():
     return {"status": "ok", "message": "ArcPlayer API is running!"}
-
 
 @app.get("/search")
 async def search(q: str, limit: int = 20):
@@ -39,7 +36,7 @@ async def search(q: str, limit: int = 20):
                 'title': v.get('title', 'Unknown'),
                 'artist': v.get('uploader', 'Unknown'),
                 'duration': v.get('duration', 0),
-                'thumbnail': v.get('thumbnail', ''),
+                'thumbnail': f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg",
                 'youtubeId': v['id'],
                 'isLocal': False,
             } for v in results.get('entries', []) if v]
@@ -75,7 +72,7 @@ async def get_stream(video_id: str):
                     'title': info.get('title', 'Unknown'),
                     'artist': info.get('uploader', 'Unknown'),
                     'duration': info.get('duration', 0),
-                    'thumbnail': info.get('thumbnail', ''),
+                    'thumbnail': f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
                 }
             raise HTTPException(
                 status_code=404,
@@ -84,7 +81,6 @@ async def get_stream(video_id: str):
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, _get_stream)
-
 
 @app.get("/related/{video_id}")
 async def get_related(video_id: str):
@@ -101,14 +97,13 @@ async def get_related(video_id: str):
                 'title': v.get('title', 'Unknown'),
                 'artist': v.get('uploader', 'Unknown'),
                 'duration': v.get('duration', 0),
-                'thumbnail': v.get('thumbnail', ''),
+                'thumbnail': f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg",
                 'youtubeId': v['id'],
                 'isLocal': False,
             } for v in related[:15] if v.get('id')]
 
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, _get_related)
-
 
 @app.get("/playlist/{playlist_id}")
 async def get_playlist(playlist_id: str):
@@ -124,13 +119,13 @@ async def get_playlist(playlist_id: str):
             )
             return {
                 'title': info.get('title', 'Unknown'),
-                'thumbnail': info.get('thumbnail', ''),
+                'thumbnail': f"https://i.ytimg.com/vi/{info.get('entries', [{}])[0].get('id', '')}/hqdefault.jpg",
                 'songs': [{
                     'id': v['id'],
                     'title': v.get('title', 'Unknown'),
                     'artist': v.get('uploader', 'Unknown'),
                     'duration': v.get('duration', 0),
-                    'thumbnail': v.get('thumbnail', ''),
+                    'thumbnail': f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg",
                     'youtubeId': v['id'],
                     'isLocal': False,
                 } for v in info.get('entries', []) if v]
@@ -139,3 +134,27 @@ async def get_playlist(playlist_id: str):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, _get_playlist)
 
+@app.get("/trending")
+async def get_trending():
+    def _get_trending():
+        ydl_opts = {
+            'quiet': True,
+            'extract_flat': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            results = ydl.extract_info(
+                "https://www.youtube.com/feed/trending?bp=4gINGgt5dG1hX2NoYXJ0cw%3D%3D",
+                download=False
+            )
+            return [{
+                'id': v['id'],
+                'title': v.get('title', 'Unknown'),
+                'artist': v.get('uploader', 'Unknown'),
+                'duration': v.get('duration', 0),
+                'thumbnail': f"https://i.ytimg.com/vi/{v['id']}/hqdefault.jpg",
+                'youtubeId': v['id'],
+                'isLocal': False,
+            } for v in results.get('entries', [])[:20] if v and v.get('id')]
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, _get_trending)
