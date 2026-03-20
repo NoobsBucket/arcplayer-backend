@@ -1,16 +1,14 @@
 FROM python:3.11-slim
 
-
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
-
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends \
-    ffmpeg \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+    ffmpeg nodejs npm && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
