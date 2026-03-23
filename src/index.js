@@ -259,9 +259,6 @@ app.get('/trending', async (req, res) => {
   }
 });
 
-// ─────────────────────────────────
-// BOOT
-// ─────────────────────────────────
 const PORT = process.env.PORT || 8000;
 
 Promise.all([getInnertube(), getWebInnertube()])
@@ -270,4 +267,4 @@ Promise.all([getInnertube(), getWebInnertube()])
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🎵 ArcPlayer API running on port ${PORT}`);
-});git 
+});
