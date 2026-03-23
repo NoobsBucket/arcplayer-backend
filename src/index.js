@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { Innertube, Platform } from 'youtubei.js';
+import { Innertube, Platform, ClientType } from 'youtubei.js';
 import fs from 'fs';
 
 const app = express();
@@ -10,7 +10,7 @@ app.use(express.json());
 const COOKIES_FILE = '/app/cookies.txt';
 
 // ─────────────────────────────────
-// JS INTERPRETER (fixes decipher)
+// JS INTERPRETER — must be before Innertube.create()
 // ─────────────────────────────────
 Platform.shim.eval = async (data, env) => {
   const properties = [];
@@ -22,14 +22,17 @@ Platform.shim.eval = async (data, env) => {
 
 // ─────────────────────────────────
 // INNERTUBE SINGLETON
+// TV_EMBEDDED client doesn't need po_token unlike WEB client
 // ─────────────────────────────────
 let yt;
+let ytMusic; // separate instance for search (WEB client gives better search results)
 
 async function getInnertube() {
   if (yt) return yt;
 
   const opts = {
-    generate_session_locally: true,
+    client_type: ClientType.TV_EMBEDDED, // bypasses po_token requirement
+    generate_session_locally: false,     // let it do proper session init
   };
 
   if (fs.existsSync(COOKIES_FILE)) {
@@ -43,12 +46,35 @@ async function getInnertube() {
       })
       .filter(Boolean)
       .join('; ');
-
     if (cookieHeader) opts.cookie = cookieHeader;
   }
 
   yt = await Innertube.create(opts);
   return yt;
+}
+
+// separate WEB client instance just for search/browse — better results
+async function getWebInnertube() {
+  if (ytMusic) return ytMusic;
+
+  const opts = { generate_session_locally: true };
+
+  if (fs.existsSync(COOKIES_FILE)) {
+    const raw = fs.readFileSync(COOKIES_FILE, 'utf-8');
+    const cookieHeader = raw
+      .split('\n')
+      .filter(l => l && !l.startsWith('#'))
+      .map(l => {
+        const parts = l.split('\t');
+        return parts.length >= 7 ? `${parts[5]}=${parts[6]}` : null;
+      })
+      .filter(Boolean)
+      .join('; ');
+    if (cookieHeader) opts.cookie = cookieHeader;
+  }
+
+  ytMusic = await Innertube.create(opts);
+  return ytMusic;
 }
 
 // ─────────────────────────────────
@@ -78,19 +104,19 @@ app.get('/health', (req, res) => {
     status: 'ok',
     message: 'ArcPlayer API is running!',
     cookies: fs.existsSync(COOKIES_FILE),
-    engine: 'youtubei.js',
+    engine: 'youtubei.js (TV_EMBEDDED)',
   });
 });
 
 // ─────────────────────────────────
-// SEARCH
+// SEARCH — uses WEB client (better results)
 // ─────────────────────────────────
 app.get('/search', async (req, res) => {
   try {
     const { q, limit = 20 } = req.query;
     if (!q) return res.status(400).json({ error: 'q is required' });
 
-    const innertube = await getInnertube();
+    const innertube = await getWebInnertube();
     const results = await innertube.search(q, { type: 'video' });
 
     const videos = (results.videos || [])
@@ -106,7 +132,7 @@ app.get('/search', async (req, res) => {
 });
 
 // ─────────────────────────────────
-// STREAM
+// STREAM — uses TV_EMBEDDED (no po_token needed)
 // ─────────────────────────────────
 app.get('/stream/:video_id', async (req, res) => {
   try {
@@ -131,7 +157,7 @@ app.get('/stream/:video_id', async (req, res) => {
     const url = format.decipher(innertube.session.player);
 
     if (!url) {
-      return res.status(500).json({ error: 'Failed to decipher stream URL' });
+      return res.status(500).json({ error: 'Failed to decipher URL' });
     }
 
     res.json({
@@ -153,7 +179,7 @@ app.get('/stream/:video_id', async (req, res) => {
 app.get('/related/:video_id', async (req, res) => {
   try {
     const { video_id } = req.params;
-    const innertube = await getInnertube();
+    const innertube = await getWebInnertube();
 
     const info = await innertube.getInfo(video_id);
 
@@ -176,7 +202,7 @@ app.get('/related/:video_id', async (req, res) => {
 app.get('/playlist/:playlist_id', async (req, res) => {
   try {
     const { playlist_id } = req.params;
-    const innertube = await getInnertube();
+    const innertube = await getWebInnertube();
 
     const playlist = await innertube.getPlaylist(playlist_id);
     const entries = playlist.videos || [];
@@ -198,7 +224,7 @@ app.get('/playlist/:playlist_id', async (req, res) => {
 // ─────────────────────────────────
 app.get('/trending', async (req, res) => {
   try {
-    const innertube = await getInnertube();
+    const innertube = await getWebInnertube();
     const trending = await innertube.getTrending();
 
     const musicTab = trending.tabs?.find(t =>
@@ -206,7 +232,6 @@ app.get('/trending', async (req, res) => {
     );
 
     let videos = [];
-
     if (musicTab) {
       try {
         const feed = await musicTab.endpoint.call(innertube.actions);
@@ -215,7 +240,6 @@ app.get('/trending', async (req, res) => {
           .map(normalizeVideo)
           .filter(Boolean);
       } catch {
-        // fallback to main trending if music tab fails
         videos = (trending.videos ?? trending.contents ?? [])
           .slice(0, 20)
           .map(normalizeVideo)
@@ -235,13 +259,15 @@ app.get('/trending', async (req, res) => {
   }
 });
 
-
+// ─────────────────────────────────
+// BOOT
+// ─────────────────────────────────
 const PORT = process.env.PORT || 8000;
 
-getInnertube()
-  .then(() => console.log('✅ Innertube ready'))
+Promise.all([getInnertube(), getWebInnertube()])
+  .then(() => console.log('✅ Both Innertube clients ready'))
   .catch(e => console.error('❌ Innertube init failed:', e.message));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🎵 ArcPlayer API running on port ${PORT}`);
-});
+});git 
