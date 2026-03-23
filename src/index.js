@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { Innertube } from 'youtubei.js';
+import { Innertube, Platform } from 'youtubei.js';
 import fs from 'fs';
 
 const app = express();
@@ -10,7 +10,18 @@ app.use(express.json());
 const COOKIES_FILE = '/app/cookies.txt';
 
 // ─────────────────────────────────
-// INIT INNERTUBE (once, reused)
+// JS INTERPRETER (fixes decipher)
+// ─────────────────────────────────
+Platform.shim.eval = async (data, env) => {
+  const properties = [];
+  if (env.n) properties.push(`n: exportedVars.nFunction("${env.n}")`);
+  if (env.sig) properties.push(`sig: exportedVars.sigFunction("${env.sig}")`);
+  const code = `${data.output}\nreturn { ${properties.join(', ')} }`;
+  return new Function(code)();
+};
+
+// ─────────────────────────────────
+// INNERTUBE SINGLETON
 // ─────────────────────────────────
 let yt;
 
@@ -18,13 +29,11 @@ async function getInnertube() {
   if (yt) return yt;
 
   const opts = {
-    generate_session_locally: true, // faster startup
+    generate_session_locally: true,
   };
 
-  // pass cookies if available (same as your yt-dlp setup)
   if (fs.existsSync(COOKIES_FILE)) {
     const raw = fs.readFileSync(COOKIES_FILE, 'utf-8');
-    // cookies.txt is Netscape format — extract Cookie header string
     const cookieHeader = raw
       .split('\n')
       .filter(l => l && !l.startsWith('#'))
@@ -42,27 +51,27 @@ async function getInnertube() {
   return yt;
 }
 
-// helper to safely get thumbnail
+// ─────────────────────────────────
+// HELPERS
+// ─────────────────────────────────
 const thumb = (id) => `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
 
-// normalize a video object from various youtubei.js response shapes
 function normalizeVideo(v) {
   const id = v?.id || v?.video_id;
   if (!id) return null;
   return {
     id,
     title: v?.title?.text ?? v?.title ?? 'Unknown',
-    artist: v?.author?.name ?? v?.short_byline_text?.text ?? 'Unknown',
-    duration: v?.duration?.seconds ?? 0,
+    artist: v?.author?.name ?? v?.short_byline_text?.text ?? v?.author ?? 'Unknown',
+    duration: v?.duration?.seconds ?? v?.duration ?? 0,
     thumbnail: thumb(id),
     youtubeId: id,
     isLocal: false,
   };
 }
 
-
 // ─────────────────────────────────
-// HEALTH CHECK
+// HEALTH
 // ─────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({
@@ -72,7 +81,6 @@ app.get('/health', (req, res) => {
     engine: 'youtubei.js',
   });
 });
-
 
 // ─────────────────────────────────
 // SEARCH
@@ -97,25 +105,34 @@ app.get('/search', async (req, res) => {
   }
 });
 
-
 // ─────────────────────────────────
-// GET STREAM URL  🔥 fast now
+// STREAM
 // ─────────────────────────────────
 app.get('/stream/:video_id', async (req, res) => {
   try {
     const { video_id } = req.params;
     const innertube = await getInnertube();
 
-    const info = await innertube.getBasicInfo(video_id);
+    const info = await innertube.getInfo(video_id);
 
-    // pick best audio-only format
-    const format = info.chooseFormat({ type: 'audio', quality: 'best' });
+    if (!info?.streaming_data) {
+      return res.status(500).json({ error: 'Streaming data not available' });
+    }
+
+    const format = info.chooseFormat({
+      type: 'audio',
+      quality: 'best',
+    });
 
     if (!format) {
       return res.status(404).json({ error: 'No audio format found' });
     }
 
     const url = format.decipher(innertube.session.player);
+
+    if (!url) {
+      return res.status(500).json({ error: 'Failed to decipher stream URL' });
+    }
 
     res.json({
       url,
@@ -130,23 +147,21 @@ app.get('/stream/:video_id', async (req, res) => {
   }
 });
 
-
 // ─────────────────────────────────
-// GET RELATED  (next song suggestions)
+// RELATED
 // ─────────────────────────────────
 app.get('/related/:video_id', async (req, res) => {
   try {
     const { video_id } = req.params;
     const innertube = await getInnertube();
 
-    // getInfo gives richer data including watch_next panel
     const info = await innertube.getInfo(video_id);
 
-    const related = info.watch_next_feed
-      ?.filter(v => v?.type === 'CompactVideo')
-      ?.slice(0, 15)
-      ?.map(normalizeVideo)
-      ?.filter(Boolean) ?? [];
+    const related = (info.watch_next_feed ?? [])
+      .filter(v => v?.type === 'CompactVideo')
+      .slice(0, 15)
+      .map(normalizeVideo)
+      .filter(Boolean);
 
     res.json(related);
   } catch (e) {
@@ -155,9 +170,8 @@ app.get('/related/:video_id', async (req, res) => {
   }
 });
 
-
 // ─────────────────────────────────
-// GET PLAYLIST
+// PLAYLIST
 // ─────────────────────────────────
 app.get('/playlist/:playlist_id', async (req, res) => {
   try {
@@ -179,28 +193,40 @@ app.get('/playlist/:playlist_id', async (req, res) => {
   }
 });
 
-
 // ─────────────────────────────────
-// GET TRENDING
+// TRENDING
 // ─────────────────────────────────
 app.get('/trending', async (req, res) => {
   try {
     const innertube = await getInnertube();
     const trending = await innertube.getTrending();
 
-    // Music tab is more relevant for a music app
     const musicTab = trending.tabs?.find(t =>
       t?.title?.toLowerCase().includes('music')
     );
 
-    const feed = musicTab
-      ? await musicTab.endpoint.call(innertube.actions)
-      : trending;
+    let videos = [];
 
-    const videos = (feed.videos ?? feed.contents ?? [])
-      .slice(0, 20)
-      .map(normalizeVideo)
-      .filter(Boolean);
+    if (musicTab) {
+      try {
+        const feed = await musicTab.endpoint.call(innertube.actions);
+        videos = (feed.videos ?? feed.contents ?? [])
+          .slice(0, 20)
+          .map(normalizeVideo)
+          .filter(Boolean);
+      } catch {
+        // fallback to main trending if music tab fails
+        videos = (trending.videos ?? trending.contents ?? [])
+          .slice(0, 20)
+          .map(normalizeVideo)
+          .filter(Boolean);
+      }
+    } else {
+      videos = (trending.videos ?? trending.contents ?? [])
+        .slice(0, 20)
+        .map(normalizeVideo)
+        .filter(Boolean);
+    }
 
     res.json(videos);
   } catch (e) {
@@ -210,15 +236,11 @@ app.get('/trending', async (req, res) => {
 });
 
 
-// ─────────────────────────────────
-// START
-// ─────────────────────────────────
 const PORT = process.env.PORT || 8000;
 
-// warm up innertube on boot so first request is fast
 getInnertube()
   .then(() => console.log('✅ Innertube ready'))
-  .catch(e => console.error('Innertube init failed:', e.message));
+  .catch(e => console.error('❌ Innertube init failed:', e.message));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🎵 ArcPlayer API running on port ${PORT}`);
